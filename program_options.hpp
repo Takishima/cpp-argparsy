@@ -74,6 +74,26 @@ namespace internal_ {
 
      // ========================================================================
 
+     enum DEPENDENT_FUNCTION {
+	  UINT_ASSIGN,
+	  BITCOUNT_ASSIGN,
+	  INVALID_FUNC
+     };
+     
+     // ------------------------------------------------------------------------
+     
+     inline unsigned int bitcount(unsigned int flags)
+     {
+	  unsigned int N(0);
+	  
+	  for (; flags > 0; ++N) {
+	       flags &= (flags - 1);
+	  }
+	  return N;
+     }
+
+     // ========================================================================
+
      typedef std::vector<std::string> program_option_type;
 
      //! Class wrap a reference for storage in STL containers
@@ -194,9 +214,9 @@ namespace internal_ {
 	  virtual void print_help_line() const = 0;
 
 	  const std::string& short_name() const { return short_name_; }
-	  const std::string& long_name() const { return long_name_; }
-	  const std::string& help_name() const { return help_name_; }
-	  const std::string& desc() const { return desc_; }
+	  const std::string& long_name()  const { return long_name_;  }
+	  const std::string& help_name()  const { return help_name_;  }
+	  const std::string& desc()       const { return desc_;       }
 
 	  virtual std::string usage_name() const
 	       {
@@ -211,6 +231,12 @@ namespace internal_ {
 	       }
 
 	  virtual bool uint_assign_to(unsigned int&) const = 0;
+	  virtual bool bitcount_assign_to(unsigned int& val) const
+	       {
+		    bool ret = uint_assign_to(val);
+		    val = bitcount(val);
+		    return ret;
+	       }
 
      protected:
 	  std::string short_name_;
@@ -223,23 +249,53 @@ namespace internal_ {
 
      // ========================================================================
 
+     typedef bool (OptionValueBase::*assign_func_t)(unsigned int&) const;
+     
      struct CountDependentOption
      {
 	  CountDependentOption(const char* name_a,
+			       DEPENDENT_FUNCTION func_type_a = INVALID_FUNC,
 			       bool force_exact_count_a = true)
 	       : name(name_a)
+	       , func_type(func_type_a)
+	       , func(NULL)
 	       , dependent(NULL)
 	       , force_exact_count(force_exact_count_a)
-		 {}
-
+	       {
+		    switch(func_type) {
+		    case UINT_ASSIGN:
+			 func = &OptionValueBase::uint_assign_to;
+			 break;
+		    case BITCOUNT_ASSIGN:
+			 func = &OptionValueBase::bitcount_assign_to;
+			 break;
+		    default:
+			 func = NULL;
+		    }
+	       }
+	  
 	  std::string name;
+	  DEPENDENT_FUNCTION func_type;
+	  assign_func_t func;
 	  OptionValueBase* dependent;
 	  bool force_exact_count;
      };
      
      inline CountDependentOption count_depends_on(const char* name)
 	  {
-	       return CountDependentOption(name);
+	       return CountDependentOption(name, UINT_ASSIGN);
+	  }
+     inline CountDependentOption count_depends_on_bitcount(const char* name)
+	  {
+	       return CountDependentOption(name, BITCOUNT_ASSIGN);
+	  }
+     
+     // ------------------------------------------------------------------------
+
+     struct AnythingButLast {};
+     inline AnythingButLast anything_but_last()
+	  {
+	       return AnythingButLast();
 	  }
      
      // ------------------------------------------------------------------------
@@ -679,7 +735,7 @@ namespace internal_ {
 	       , count_(0)
 	       , exact_count_(false)
 	       , max_count_(count)
-	       , count_dependent_(NULL)
+	       , count_dep_opt_("")
 	       {}
 
 	  PositionalValue(const char* h_name,
@@ -692,14 +748,29 @@ namespace internal_ {
 	       , count_(0)
 	       , exact_count_(opt.force_exact_count)
 	       , max_count_(0)
-	       , count_dependent_(opt.dependent)
+	       , count_dep_opt_(opt)
 	       {}
 	  	  
+	  PositionalValue(const char* h_name,
+			  std::vector<T>& val,
+			  const AnythingButLast&,
+			  const char* desc,
+			  bool required = true)
+	       : OptionValueBase(h_name, desc, required)
+	       , value_(val)
+	       , count_(0)
+	       , exact_count_(false)
+	       , max_count_(-1)
+	       , count_dep_opt_("")
+	       {}
+
 	  bool consume(program_option_type& opts)
 	       {
 		    if (max_count_ == 0) {
-			 if (count_dependent_ != NULL) {
-			      count_dependent_->uint_assign_to(max_count_);
+			 if (count_dep_opt_.dependent != NULL) {
+			      unsigned int max_count(0);
+			      (count_dep_opt_.dependent->*count_dep_opt_.func)(max_count);
+			      max_count_ = max_count;
 			 }
 			 else {
 			      std::cerr << "max_count = 0 && count_dependent == NULL"
@@ -707,14 +778,21 @@ namespace internal_ {
 			      return false;
 			 }
 		    }
-		    
+
 		    typedef program_option_type::iterator iter_type;
 		    // multiple-valued positional consume as many arguments as
 		    // possible
 		    bool cont_flag(true);
 		    iter_type mark(opts.begin());
+
+		    // Skip last element if required
+		    iter_type end(opts.end());
+		    if (max_count_ == -1 && opts.size() > 0) {
+			 end = opts.end() - 1;
+		    }
+		    
 		    for (iter_type it(opts.begin());
-			 cont_flag && it != opts.end() && count_ < max_count_;
+			 cont_flag && it != end && (max_count_ <= 0 || (max_count_ > 0 && count_ < max_count_));
 			 ++it) {
 			 if ((*it)[0] != '-') {
 			      std::istringstream ssin(*it);
@@ -735,12 +813,13 @@ namespace internal_ {
 			      }
 			 }
 		    }
+		    
 		    opts.erase(opts.begin(), mark);
 		    if (!cont_flag) {
 			 return false;
 		    }
 
-		    if (exact_count_ > 0 && count_ != max_count_) {
+		    if (exact_count_ && count_ != max_count_) {
 			 std::cerr << "ERROR: " << help_name()
 				   << " requires exactly " << max_count_
 				   << " arguments!"
@@ -754,24 +833,50 @@ namespace internal_ {
 
 	  void print_help_line() const
 	       {
-		    if (count_dependent_ != NULL) {
+		    if (count_dep_opt_.dependent != NULL) {
 			 std::ostringstream ssout;
 			 ssout << help_name_
-			       << " (" << count_dependent_->help_name() << " x)";
+			       << " (" << count_dep_opt_.dependent->help_name() << " x)";
 			 std::cout << std::left << std::setw(HELP_PAD)
 				   << ssout.str()
 				   << desc_
 				   << std::endl
 				   << std::left << std::setw(HELP_PAD)
-				   << " "
-				   << "-> count depends on "
-				   << count_dependent_->help_name()
-				   << std::endl;
+				   << " ";
+
+			 switch (count_dep_opt_.func_type) {
+			 case UINT_ASSIGN:
+			      std::cout << "-> count depends on "
+					<< count_dep_opt_.dependent->help_name()
+					<< std::endl;
+			      break;
+			 case BITCOUNT_ASSIGN:
+			      std::cout << "-> count depends on bitcount of "
+					<< count_dep_opt_.dependent->help_name()
+					<< std::endl;				   
+			      break;
+			 default:
+			      std::cout << "-> depends on "
+					<< count_dep_opt_.dependent->help_name()
+					<< std::endl
+					<< "but method is INVALID!"
+					<< std::endl;
+			 }
 		    }
 		    else if (max_count_ > 1) {
 			 std::ostringstream ssout;
 			 ssout << help_name_
 			       << " (" << max_count_ << "x)";
+			 std::cout << std::left << std::setw(HELP_PAD)
+				   << ssout.str()
+				   << desc_ << std::endl;
+		    }
+		    else if (max_count_ == -1) {
+			 std::ostringstream ssout;
+			 ssout << help_name_ << "1 "
+			       << help_name_ << "2 ... "
+			       << help_name_ << "N";
+			 
 			 std::cout << std::left << std::setw(HELP_PAD)
 				   << ssout.str()
 				   << desc_ << std::endl;
@@ -782,15 +887,15 @@ namespace internal_ {
 				   << desc_ << std::endl;
 		    }
 	       }
-
+	  
 	  bool uint_assign_to(unsigned int&) const { return false; }
      
      private:
 	  ReferenceWrapper< std::vector<T> > value_;
 	  unsigned int count_;
 	  bool exact_count_;
-	  unsigned int max_count_;
-	  OptionValueBase* count_dependent_;
+	  int max_count_;
+	  CountDependentOption count_dep_opt_;;
      };
 
      // ========================================================================
@@ -905,9 +1010,26 @@ namespace internal_ {
 						       desc,
 						       required);
      }
+     
+     //! Helper function to ease the creating of options
+     template <typename T>
+     OptionValueBase* make_value(const char* help_name,
+				 std::vector<T>& value,
+				 const AnythingButLast& opt,
+				 const char* desc,
+				 bool required)
+     {
+	  return new PositionalValue< std::vector<T> >(help_name,
+						       value,
+						       opt,
+						       desc,
+						       required);
+     }
 } // namespace internal_
 
+using internal_::anything_but_last;
 using internal_::count_depends_on;
+using internal_::count_depends_on_bitcount;
 
 // =============================================================================
 
@@ -1058,6 +1180,22 @@ public:
 	       positionals_.push_back(internal_::make_value(help_name,
 							    value,
 							    count,
+							    desc,
+							    required));
+	       return *this;
+	  }
+
+     //! Method to add a positional option with multiple values (skipping the last existing argument)
+     template <typename T>
+     ProgramOptionManager& add_option(const char* help_name,
+				      std::vector<T>& value,
+				      const internal_::AnythingButLast& opt,
+				      const char* desc,
+				      bool required = true)
+	  {
+	       positionals_.push_back(internal_::make_value(help_name,
+							    value,
+							    opt,
 							    desc,
 							    required));
 	       return *this;

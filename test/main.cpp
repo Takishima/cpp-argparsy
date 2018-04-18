@@ -31,10 +31,14 @@ int main(int argc, char *argv[])
      std::vector<int> v;
      some_type st;
      std::vector<std::string> values;
+     std::string s;
      
      ProgramOptionManager args(argv[0], "This is a demonstration program");
      args.add_option("count", count, "a number");
      args.add_option("pos2", values, count_depends_on("count"), "a multiple-valued positional");
+
+     // args.add_option("val", values, anything_but_last(), "a multiple-valued positional");
+     // args.add_option("string", s, "some string positional argument");
      
      args.add_option("u", "uint", l, "an argument with a single");
      args.add_option("v", "vector", v, 3, "an argument with 3 values");
